@@ -2,22 +2,26 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/gocolly/colly"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/robfig/cron/v3"
 	"golang.org/x/net/proxy"
 )
 
@@ -30,15 +34,15 @@ type Config struct {
 	TelegramChatID   string `json:"telegram_chat_id"`
 	ProxyAddress     string `json:"proxy_address"`
 	RequestTimeout   int    `json:"request_timeout_seconds"`
-	RateLimit       int    `json:"rate_limit_ms"`
+	RateLimit        int    `json:"rate_limit_ms"`
 }
 
 // Results structure with metadata
 type Result struct {
-	Emails     []string  `json:"emails"`
-	Location   string    `json:"location"`
-	Timestamp  time.Time `json:"timestamp"`
-	Source     string    `json:"source"`
+	Emails    []string  `json:"emails"`
+	Location  string    `json:"location"`
+	Timestamp time.Time `json:"timestamp"`
+	Source    string    `json:"source"`
 }
 
 // Global variables
@@ -47,18 +51,22 @@ var (
 	results []Result
 	mu      sync.Mutex
 	logger  *log.Logger
+	db      *sql.DB
 )
 
 func init() {
 	// Initialize logger
 	logFile, err := os.OpenFile("careerfind.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to open log file: %v", err)
 	}
 	logger = log.New(logFile, "", log.LstdFlags)
 
 	// Load configuration with environment variables priority
 	loadConfig()
+
+	// Initialize database
+	initDB()
 }
 
 func loadConfig() {
@@ -68,7 +76,7 @@ func loadConfig() {
 		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 		ProxyAddress:     os.Getenv("PROXY_ADDRESS"),
 		RequestTimeout:   getEnvInt("REQUEST_TIMEOUT", 30),
-		RateLimit:       getEnvInt("RATE_LIMIT_MS", 1000),
+		RateLimit:        getEnvInt("RATE_LIMIT_MS", 1000),
 	}
 
 	// Fall back to config file if env vars not set
@@ -81,7 +89,7 @@ func loadConfig() {
 
 func getEnvInt(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
-		if parsed, err := parseInt(val); err == nil {
+		if parsed, err := strconv.Atoi(val); err == nil {
 			return parsed
 		}
 	}
@@ -102,6 +110,27 @@ func loadConfigFromFile() error {
 	return nil
 }
 
+func initDB() {
+	var err error
+	db, err = sql.Open("sqlite3", "./careerfind.db")
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+
+	createTableSQL := `CREATE TABLE IF NOT EXISTS results (
+		"id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,		
+		"emails" TEXT,
+		"location" TEXT,
+		"timestamp" DATETIME,
+		"source" TEXT
+	);`
+
+	_, err = db.Exec(createTableSQL)
+	if err != nil {
+		log.Fatalf("Failed to create table: %v", err)
+	}
+}
+
 func main() {
 	// Command-line arguments with improved descriptions
 	location := flag.String("L", "", "Filter by location (city/country)")
@@ -120,40 +149,66 @@ func main() {
 		return
 	}
 
+	// Set logger output based on verbose flag
+	if *verbose {
+		log.Printf("Starting CareerFind with location: %s", *location)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Validate configuration
 	if err := validateConfig(); err != nil {
-		logger.Fatalf("Configuration error: %v", err)
+		log.Printf("Configuration error: %v", err)
+		os.Exit(1)
 	}
 
 	// Identify target pages with context
+	if *verbose {
+		log.Printf("Identifying target pages for search engines: %s", *searchEngines)
+	}
 	pages, err := identifyTargetPages(ctx, *searchEngines, *linkedinMode, *location, *proxyEnabled)
 	if err != nil {
-		logger.Fatalf("Failed to identify target pages: %v", err)
+		log.Printf("Failed to identify target pages: %v", err)
+		os.Exit(1)
+	}
+	if *verbose {
+		log.Printf("Found %d target pages", len(pages))
 	}
 
 	// Extract emails with improved error handling
+	if *verbose {
+		log.Printf("Starting email extraction from pages...")
+	}
 	if err := extractEmails(ctx, pages, *proxyEnabled, *verbose); err != nil {
-		logger.Printf("Some errors occurred during email extraction: %v", err)
+		log.Printf("Some errors occurred during email extraction: %v", err)
 	}
 
 	// Save results with error handling
 	if err := saveResults(*outputFormat); err != nil {
-		logger.Printf("Failed to save results: %v", err)
+		log.Printf("Failed to save results: %v", err)
+		os.Exit(1)
+	}
+
+	// Save results to database
+	if err := saveResultsToDB(); err != nil {
+		log.Printf("Failed to save results to database: %v", err)
 	}
 
 	// Send notifications if enabled
 	if *notificationMethod == "telegram" {
 		if err := sendTelegramNotification(); err != nil {
-			logger.Printf("Failed to send Telegram notification: %v", err)
+			log.Printf("Failed to send Telegram notification: %v", err)
 		}
 	}
 
 	// Setup automation if requested
 	if *automation {
 		scheduleAutomation()
+	}
+
+	if *verbose {
+		log.Printf("CareerFind execution completed")
 	}
 }
 
@@ -175,16 +230,64 @@ func validateConfig() error {
 	return nil
 }
 
+func identifyTargetPages(ctx context.Context, searchEngines string, linkedinMode bool, location string, proxyEnabled bool) ([]string, error) {
+	if location == "" {
+		return nil, errors.New("location cannot be empty")
+	}
+
+	var pages []string
+	engines := strings.Split(strings.ToLower(searchEngines), ",")
+
+	// Handle "all" option
+	if searchEngines == "all" {
+		engines = []string{"google", "bing", "duckduckgo"}
+	}
+
+	for _, engine := range engines {
+		searchQuery := url.QueryEscape("email careers " + location)
+		var searchURL string
+
+		switch engine {
+		case "google":
+			searchURL = "https://www.google.com/search?q=" + searchQuery
+		case "bing":
+			searchURL = "https://www.bing.com/search?q=" + searchQuery
+		case "duckduckgo":
+			searchURL = "https://duckduckgo.com/?q=" + searchQuery
+		default:
+			continue
+		}
+
+		if searchURL != "" {
+			pages = append(pages, searchURL)
+		}
+	}
+
+	if linkedinMode {
+		linkedinURL := "https://www.linkedin.com/jobs/search?keywords=" + url.QueryEscape(location)
+		pages = append(pages, linkedinURL)
+	}
+
+	if len(pages) == 0 {
+		return nil, errors.New("no valid search engines specified")
+	}
+
+	return pages, nil
+}
+
 func extractEmails(ctx context.Context, pages []string, proxyEnabled bool, verbose bool) error {
 	var wg sync.WaitGroup
-	rateLimiter := time.Tick(time.Duration(config.RateLimit) * time.Millisecond)
 	errs := make(chan error, len(pages))
+
+	// Create a ticker for rate limiting instead of time.Tick
+	ticker := time.NewTicker(time.Duration(config.RateLimit) * time.Millisecond)
+	defer ticker.Stop()
 
 	for _, page := range pages {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-rateLimiter:
+		case <-ticker.C:
 			wg.Add(1)
 			go func(page string) {
 				defer wg.Done()
@@ -216,6 +319,7 @@ func processPage(ctx context.Context, page string, proxyEnabled bool, verbose bo
 	c := colly.NewCollector(
 		colly.MaxDepth(2),
 		colly.Async(true),
+		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
 	)
 
 	// Set timeout
@@ -229,14 +333,28 @@ func processPage(ctx context.Context, page string, proxyEnabled bool, verbose bo
 
 	emailRegex := regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
 
+	// Add error handling for responses
+	c.OnError(func(r *colly.Response, err error) {
+		if verbose {
+			logger.Printf("Error scraping %s: %v", r.Request.URL, err)
+		}
+	})
+
+	// Add response handling to check status
+	c.OnResponse(func(r *colly.Response) {
+		if verbose {
+			logger.Printf("Visited %s (status: %d)", r.Request.URL, r.StatusCode)
+		}
+	})
+
 	c.OnHTML("*", func(e *colly.HTMLElement) {
 		if emails := extractEmailsFromText(e.Text, emailRegex); len(emails) > 0 {
 			mu.Lock()
 			results = append(results, Result{
 				Emails:    emails,
-				Location: page,
+				Location:  page,
 				Timestamp: time.Now(),
-				Source:   e.Request.URL.String(),
+				Source:    e.Request.URL.String(),
 			})
 			mu.Unlock()
 
@@ -246,13 +364,29 @@ func processPage(ctx context.Context, page string, proxyEnabled bool, verbose bo
 		}
 	})
 
-	return c.Visit(page)
+	// Add headers to look more like a browser
+	c.OnRequest(func(r *colly.Request) {
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
+		if verbose {
+			logger.Printf("Visiting %s", r.URL)
+		}
+	})
+
+	err := c.Visit(page)
+	if err != nil {
+		return fmt.Errorf("failed to visit page %s: %w", page, err)
+	}
+
+	// Wait for all requests to finish
+	c.Wait()
+	return nil
 }
 
 func setupProxy(c *colly.Collector) error {
 	dialer, err := proxy.SOCKS5("tcp", config.ProxyAddress, nil, proxy.Direct)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
 	}
 
 	c.WithTransport(&http.Transport{
@@ -268,13 +402,18 @@ func extractEmailsFromText(text string, regex *regexp.Regexp) []string {
 	var result []string
 
 	for _, email := range emails {
-		if !uniqueEmails[email] {
+		if isValidEmail(email) && !uniqueEmails[email] {
 			uniqueEmails[email] = true
 			result = append(result, email)
 		}
 	}
 
 	return result
+}
+
+func isValidEmail(email string) bool {
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	return emailRegex.MatchString(email)
 }
 
 func saveResults(format string) error {
@@ -356,6 +495,23 @@ func saveTXT(filename string) error {
 	return nil
 }
 
+func saveResultsToDB() error {
+	if len(results) == 0 {
+		return errors.New("no results to save")
+	}
+
+	for _, result := range results {
+		emails := strings.Join(result.Emails, ",")
+		_, err := db.Exec("INSERT INTO results (emails, location, timestamp, source) VALUES (?, ?, ?, ?)",
+			emails, result.Location, result.Timestamp, result.Source)
+		if err != nil {
+			return fmt.Errorf("failed to insert result into database: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func sendTelegramNotification() error {
 	if config.TelegramBotToken == "" || config.TelegramChatID == "" {
 		return errors.New("Telegram configuration is missing")
@@ -367,8 +523,14 @@ func sendTelegramNotification() error {
 	}
 
 	message := formatTelegramMessage()
-	msg := tgbotapi.NewMessage(config.TelegramChatID, message)
-	
+
+	// Convert chat ID from string to int64
+	chatID, err := strconv.ParseInt(config.TelegramChatID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid Telegram chat ID: %w", err)
+	}
+
+	msg := tgbotapi.NewMessage(chatID, message)
 	_, err = bot.Send(msg)
 	if err != nil {
 		return fmt.Errorf("failed to send Telegram message: %w", err)
@@ -380,7 +542,7 @@ func sendTelegramNotification() error {
 func formatTelegramMessage() string {
 	var sb strings.Builder
 	sb.WriteString("📧 CareerFind Results\n\n")
-	
+
 	for _, result := range results {
 		sb.WriteString(fmt.Sprintf("📍 Location: %s\n", result.Location))
 		sb.WriteString(fmt.Sprintf("🕒 Time: %s\n", result.Timestamp.Format("2006-01-02 15:04:05")))
@@ -391,11 +553,51 @@ func formatTelegramMessage() string {
 		sb.WriteString("🔗 Source: " + result.Source + "\n")
 		sb.WriteString("-------------------\n")
 	}
-	
+
 	return sb.String()
 }
 
 func scheduleAutomation() {
-	// Implementation of cron-like scheduling
-	logger.Println("Automation scheduled - will run daily")
+	c := cron.New()
+	_, err := c.AddFunc("@daily", func() {
+		ctx := context.Background()
+		if err := runAutomatedSearch(ctx); err != nil {
+			logger.Printf("Automated search failed: %v", err)
+		}
+	})
+
+	if err != nil {
+		logger.Printf("Failed to schedule automation: %v", err)
+		return
+	}
+
+	c.Start()
+	logger.Println("Automation scheduled - will run daily at midnight")
+}
+
+func runAutomatedSearch(ctx context.Context) error {
+	// Default automated search parameters
+	location := "worldwide"
+	searchEngines := "google,bing"
+	proxyEnabled := true
+	verbose := true
+
+	pages, err := identifyTargetPages(ctx, searchEngines, false, location, proxyEnabled)
+	if err != nil {
+		return fmt.Errorf("failed to identify target pages: %w", err)
+	}
+
+	if err := extractEmails(ctx, pages, proxyEnabled, verbose); err != nil {
+		return fmt.Errorf("failed to extract emails: %w", err)
+	}
+
+	if err := saveResults("json"); err != nil {
+		return fmt.Errorf("failed to save results: %w", err)
+	}
+
+	if err := sendTelegramNotification(); err != nil {
+		return fmt.Errorf("failed to send notification: %w", err)
+	}
+
+	return nil
 }

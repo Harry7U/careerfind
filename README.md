@@ -35,6 +35,21 @@
    }
    ```
 
+## 📋 Configuration Options
+```json
+{
+  "telegram_bot_token": "YOUR_BOT_TOKEN",
+  "telegram_chat_id": "YOUR_CHAT_ID",
+  "proxy_address": "localhost:1080",
+  "request_timeout_seconds": 30,
+  "rate_limit_ms": 1000,
+  "max_retries": 3,
+  "concurrent_requests": 5,
+  "user_agent": "CareerFind Bot/1.1.0",
+  "search_depth": 2
+}
+```
+
 ## 🚀 Usage
 Run the tool with the desired options:
 ```sh
@@ -69,6 +84,17 @@ careerfind -L "San Francisco" -p -b "all" -l -o results.json -a -v
 - Runs in verbose mode (`-v`) for detailed progress
 - Automates daily scans (`-a` enabled)
 - Sends results via Telegram
+
+## 🔧 Advanced Usage
+```sh
+careerfind -L "London" -p -b "google,bing" -l -o json -m telegram -v
+```
+
+## 📦 Docker Support
+```sh
+docker build -t careerfind .
+docker run -v ${PWD}/config.json:/app/config.json careerfind
+```
 
 ## 📜 License
 [MIT](LICENSE)

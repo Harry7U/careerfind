@@ -43,10 +43,7 @@
   "proxy_address": "localhost:1080",
   "request_timeout_seconds": 30,
   "rate_limit_ms": 1000,
-  "max_retries": 3,
-  "concurrent_requests": 5,
-  "user_agent": "CareerFind Bot/1.1.0",
-  "search_depth": 2
+  "user_agent": "CareerFind Bot/2.0.0"
 }
 ```
 

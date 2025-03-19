@@ -1,32 +1,33 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: Go Build and Test
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sundays at 00:00
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [ '1.19', '1.20', '1.21' ]
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Go
+    - name: Set up Go ${{ matrix.go-version }}
       uses: actions/setup-go@v4
       with:
-        go-version: '1.20'
-        cache: true
-    
+        go-version: ${{ matrix.go-version }}
+
     - name: Install dependencies
       run: |
-        go mod init github.com/yourusername/careerfind
         go mod tidy
         go mod download
-
+        
     - name: Verify dependencies
       run: go mod verify
 

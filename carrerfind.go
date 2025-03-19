@@ -88,13 +88,11 @@ func main() {
 }
 
 func validateDependencies() {
-	// Check for required dependencies (e.g., Go, http, net/http)
 	// Placeholder for actual dependency validation logic
 }
 
 func identifyTargetPages(searchEngines string, linkedinMode bool, location string, proxyEnabled bool) []string {
 	var pages []string
-	// Use search engine dorks to find career pages and job postings
 	// Placeholder for actual search logic
 	return pages
 }
@@ -109,7 +107,6 @@ func extractEmails(pages []string, proxyEnabled bool, verbose bool) {
 			c := colly.NewCollector()
 
 			if proxyEnabled {
-				// Set up proxy
 				dialer, err := proxy.SOCKS5("tcp", "localhost:1080", nil, proxy.Direct)
 				if err != nil {
 					if verbose {
@@ -215,5 +212,5 @@ func sendTelegramNotification() {
 }
 
 func scheduleAutomation() {
-	// Placeholder for scheduling automation (e.g., using cron jobs)
+	// Placeholder for scheduling automation
 }

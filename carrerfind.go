@@ -26,7 +26,7 @@ import (
 )
 
 // Version information
-const VERSION = "1.1.0"
+const VERSION = "2.0.0"
 
 // Configuration structure with expanded fields
 type Config struct {
@@ -35,6 +35,7 @@ type Config struct {
 	ProxyAddress     string `json:"proxy_address"`
 	RequestTimeout   int    `json:"request_timeout_seconds"`
 	RateLimit        int    `json:"rate_limit_ms"`
+	UserAgent        string `json:"user_agent"`
 }
 
 // Results structure with metadata
@@ -77,6 +78,7 @@ func loadConfig() {
 		ProxyAddress:     os.Getenv("PROXY_ADDRESS"),
 		RequestTimeout:   getEnvInt("REQUEST_TIMEOUT", 30),
 		RateLimit:        getEnvInt("RATE_LIMIT_MS", 1000),
+		UserAgent:        os.Getenv("USER_AGENT"),
 	}
 
 	// Fall back to config file if env vars not set
@@ -84,6 +86,11 @@ func loadConfig() {
 		if err := loadConfigFromFile(); err != nil {
 			logger.Printf("Warning: Could not load config file: %v", err)
 		}
+	}
+
+	// Set default user agent if not specified
+	if config.UserAgent == "" {
+		config.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 	}
 }
 
@@ -223,6 +230,10 @@ func validateConfig() error {
 		errors = append(errors, "invalid rate limit value")
 	}
 
+	if config.UserAgent == "" {
+		errors = append(errors, "user agent cannot be empty")
+	}
+
 	if len(errors) > 0 {
 		return fmt.Errorf("configuration validation failed: %s", strings.Join(errors, ", "))
 	}
@@ -319,7 +330,7 @@ func processPage(ctx context.Context, page string, proxyEnabled bool, verbose bo
 	c := colly.NewCollector(
 		colly.MaxDepth(2),
 		colly.Async(true),
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+		colly.UserAgent(config.UserAgent),
 	)
 
 	// Set timeout

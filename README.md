@@ -23,10 +23,9 @@
 
 ## 🛠️ Installation
 1. Install Go from [golang.org](https://golang.org/dl/)
-2. Clone the repository:
+2. Install the tool:
    ```sh
-   git clone https://github.com/Harry7U/careerfind.git
-   cd careerfind
+   go install -v github.com/Harry7U/careerfind@latest
    ```
 3. Create a `config.json` file with your Telegram bot token and chat ID:
    ```json
@@ -35,15 +34,11 @@
      "telegram_chat_id": "YOUR_TELEGRAM_CHAT_ID"
    }
    ```
-4. Build the Go script:
-   ```sh
-   go build -o careerfind careerfind.go
-   ```
 
 ## 🚀 Usage
 Run the tool with the desired options:
 ```sh
-./careerfind -L "San Francisco" -p -b "all" -l -o results.json -a -v
+careerfind -L "San Francisco" -p -b "all" -l -o results.json -a -v
 ```
 
 ### Command-line Arguments & Options
@@ -62,7 +57,7 @@ Run the tool with the desired options:
 
 ## 💡 Example Command Execution
 ```sh
-./careerfind -L "San Francisco" -p -b "all" -l -o results.json -a -v
+careerfind -L "San Francisco" -p -b "all" -l -o results.json -a -v
 ```
 
 ### Expected Outcome:

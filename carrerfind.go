@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api"
-	"github.com/gocolly/colly"
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/gocolly/colly/v2"
 	"golang.org/x/net/proxy"
 )
 
@@ -119,7 +119,7 @@ func extractEmails(pages []string, proxyEnabled bool, verbose bool) {
 				}
 				httpTransport := &http.Transport{}
 				httpClient := &http.Client{Transport: httpTransport}
-				httpTransport.Dial = dialer.Dial
+				httpTransport.DialContext = dialer.DialContext
 				c.WithTransport(httpClient.Transport)
 			}
 

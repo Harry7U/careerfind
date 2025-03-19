@@ -170,18 +170,167 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Identify target pages with context
-	if *verbose {
-		log.Printf("Identifying target pages for search engines: %s", *searchEngines)
-	}
-	pages, err := identifyTargetPages(ctx, *searchEngines, *linkedinMode, *location, *proxyEnabled)
-	if err != nil {
-		log.Printf("Failed to identify target pages: %v", err)
-		os.Exit(1)
-	}
-	if *verbose {
-		log.Printf("Found %d target pages", len(pages))
-	}
+	// Update the identifyTargetPages function to include more search variations
+func identifyTargetPages(ctx context.Context, searchEngines string, linkedinMode bool, location string, proxyEnabled bool) ([]string, error) {
+    if location == "" {
+        return nil, errors.New("location cannot be empty")
+    }
+
+    var pages []string
+    engines := strings.Split(strings.ToLower(searchEngines), ",")
+
+    // Handle "all" option
+    if searchEngines == "all" {
+        engines = []string{"google", "bing", "duckduckgo"}
+    }
+
+    // Load search parameters from config
+    searchQueries := []string{
+        fmt.Sprintf("email careers %s", location),
+        fmt.Sprintf("contact us jobs %s", location),
+        fmt.Sprintf("careers@company %s", location),
+        fmt.Sprintf("hr@company %s", location),
+        fmt.Sprintf("recruitment %s email", location),
+        fmt.Sprintf("apply jobs %s contact", location),
+    }
+
+    for _, engine := range engines {
+        for _, query := range searchQueries {
+            encoded := url.QueryEscape(query)
+            var searchURL string
+
+            switch engine {
+            case "google":
+                searchURL = fmt.Sprintf("https://www.google.com/search?q=%s&num=100", encoded)
+            case "bing":
+                searchURL = fmt.Sprintf("https://www.bing.com/search?q=%s&count=100", encoded)
+            case "duckduckgo":
+                searchURL = fmt.Sprintf("https://duckduckgo.com/?q=%s", encoded)
+            default:
+                continue
+            }
+
+            if searchURL != "" {
+                pages = append(pages, searchURL)
+            }
+        }
+    }
+
+    if linkedinMode {
+        queries := []string{
+            fmt.Sprintf("jobs %s", location),
+            fmt.Sprintf("careers %s", location),
+            fmt.Sprintf("hiring %s", location),
+        }
+        for _, q := range queries {
+            linkedinURL := fmt.Sprintf("https://www.linkedin.com/jobs/search?keywords=%s", url.QueryEscape(q))
+            pages = append(pages, linkedinURL)
+        }
+    }
+
+    if len(pages) == 0 {
+        return nil, errors.New("no valid search engines specified")
+    }
+
+    logger.Printf("Generated %d search URLs", len(pages))
+    return pages, nil
+}
+
+// Update the processPage function with better email extraction
+func processPage(ctx context.Context, page string, proxyEnabled bool, verbose bool) error {
+    c := colly.NewCollector(
+        colly.MaxDepth(config.SearchDepth),
+        colly.Async(true),
+        colly.UserAgent(config.UserAgent),
+        colly.AllowURLRevisit(),
+    )
+
+    // Set timeout
+    c.SetRequestTimeout(time.Duration(config.RequestTimeout) * time.Second)
+
+    if proxyEnabled && config.ProxyAddress != "" {
+        if err := setupProxy(c); err != nil {
+            return fmt.Errorf("proxy setup failed: %w", err)
+        }
+        if verbose {
+            logger.Printf("Using proxy: %s", config.ProxyAddress)
+        }
+    }
+
+    // Add retry on error
+    c.OnError(func(r *colly.Response, err error) {
+        if verbose {
+            logger.Printf("Error on %s: %v", r.Request.URL, err)
+        }
+        retries := 0
+        for retries < config.MaxRetries {
+            if verbose {
+                logger.Printf("Retrying %s (attempt %d/%d)", r.Request.URL, retries+1, config.MaxRetries)
+            }
+            time.Sleep(time.Duration(1<<uint(retries)) * time.Second) // Exponential backoff
+            err := c.Visit(r.Request.URL.String())
+            if err == nil {
+                break
+            }
+            retries++
+        }
+    })
+
+    emailRegex := regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
+    
+    c.OnHTML("*", func(e *colly.HTMLElement) {
+        // Extract from text content
+        if emails := extractEmailsFromText(e.Text, emailRegex); len(emails) > 0 {
+            storeResults(emails, page, e.Request.URL.String(), verbose)
+        }
+
+        // Extract from links
+        e.ForEach("a[href^='mailto:']", func(_ int, el *colly.HTMLElement) {
+            if href := el.Attr("href"); strings.HasPrefix(href, "mailto:") {
+                email := strings.TrimPrefix(href, "mailto:")
+                email = strings.Split(email, "?")[0] // Remove any parameters
+                if isValidEmail(email) {
+                    storeResults([]string{email}, page, e.Request.URL.String(), verbose)
+                }
+            }
+        })
+    })
+
+    return c.Visit(page)
+}
+
+// Add helper function to store results
+func storeResults(emails []string, page string, source string, verbose bool) {
+    mu.Lock()
+    defer mu.Unlock()
+
+    // Filter duplicate emails
+    uniqueEmails := make(map[string]bool)
+    var filteredEmails []string
+    
+    for _, email := range emails {
+        if !uniqueEmails[email] {
+            uniqueEmails[email] = true
+            filteredEmails = append(filteredEmails, email)
+        }
+    }
+
+    if len(filteredEmails) > 0 {
+        results = append(results, Result{
+            Emails:    filteredEmails,
+            Location:  page,
+            Timestamp: time.Now().UTC(),
+            Source:    source,
+        })
+        
+        if verbose {
+            logger.Printf("Found %d unique email(s) on %s", len(filteredEmails), source)
+            for _, email := range filteredEmails {
+                logger.Printf("- %s", email)
+            }
+        }
+    }
+}
 
 	// Extract emails with improved error handling
 	if *verbose {
